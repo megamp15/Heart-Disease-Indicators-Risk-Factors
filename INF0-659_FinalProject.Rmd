@@ -1,0 +1,686 @@
+---
+title: "Heart Disease Detection and Indicators"
+output: html_notebook
+---
+
+# Introduction 
+
+Our project focuses on creating a predictive model for identifying heart disease indicators and risk factors. Heart disease is a major public health concern, being a leading cause of death in the United States for various racial groups. With approximately 47% of Americans possessing at least one of three significant risk factors—high blood pressure, high cholesterol, and smoking—early detecion and risk factor prevention are vital. We will harness a healthcare datasets, primarily derived from the CDC's Behavioral Risk Factor Surveillance System (BRFSS), to work with heart disease indicators and associated risk factors.
+
+# Problem Statement
+
+Our task is to find the key indicators/risk factors that will predict if an individual has had an heart attack.
+
+# Setup
+
+This notebook uses several packages — make sure you have installed them with
+`install.packages()` or the package installer in RStudio before trying to run
+the code in this notebook.
+
+```{r}
+library(tidyverse, warn.conflicts =FALSE)
+library(rsample, warn.conflicts=FALSE)
+library(yardstick, warn.conflicts=FALSE)
+# library(rpart, warn.conflicts=FALSE)
+# library(bnlearn, warn.conflicts=FALSE)
+library(xgboost, warn.conflicts=FALSE)
+# library(dplyr, warn.conflicts = FALSE)
+# library(stringr, warn.conflicts = FALSE)
+library(randomForest, warn.conflicts = FALSE)
+```
+
+```{r}
+set.seed(20231207)
+```
+
+# Load and Prepare the Data
+
+Load the data and read the csv file 
+
+## Load the data
+
+```{r}
+# Change this path to your data path
+heart_raw <- read_csv("heart_2022_no_nans.csv")
+glimpse(heart_raw)
+```
+
+## Prepare the data
+
+### Removing certain features
+
+I removed the following features because the association to heart disease are insignificant or some of them are not directly associated such as having arthritis could mean that taking an arthritis medication has some indirect cause for heart disease but this would mean we need more data on what kind of medication used.
+
+```{r}
+heart = heart_raw  %>%
+  select(-PneumoVaxEver, -FluVaxLast12, -HIVTesting) %>%
+  select(-HadSkinCancer, -HadArthritis)
+glimpse(heart)
+```
+
+### Converting catagorical features to factors
+
+The following features only have a few unique values so they can become factors:
+- State
+- Sex
+- General Health
+- LastCheckupTime
+- RemovedTeeth
+- Had Diabetes
+- SmokerStatus
+- ECigaretteUsage
+- RaceEthnicityCategory
+- AgeCategory
+- TetanusLast10Tdap
+- CovidPos
+
+Here are a list of the levels/order for each feature column we would like to convert to a factor
+```{r}
+State_Levels <- unique(heart$State[order(heart$State)])
+Sex_Levels  <- c("Male", "Female")
+GeneralHealth_Levels <- c("Poor", "Fair", "Good", "Very Good", "Excellent")
+LastCheckupTime_Levels  <- c("Within past year (anytime less than 12 months ago)",
+                        "Within past 2 years (1 year but less than 2 years ago)",
+                        "Within past 5 years (2 years but less than 5 years ago)",
+                        "5 or more years ago")
+RemovedTeeth_Levels <- c("None of them", "1 to 5", "6 or more, but not all", "All")
+HadDiabetes_Levels <- c("No", "No, pre-diabetes or borderline diabetes", "Yes, but only during pregnancy (female)", "Yes")
+SmokerStatus_Levels <- c("Never smoked", "Former smoker", "Current smoker - now smokes every day",
+                        "Current smoker - now smokes some days")
+ECigaretteUsage_Levels <- c("Never used e-cigarettes in my entire life", "Every day", "Not at all right now",
+                            "Not at all (right now)", "Use them every day", "Use them some days")
+RaceEthnicityCategory_Levels <- c("White only, Non-Hispanic", "Multiracial, Non-Hispanic", "Black only, Non-Hispanic",
+                          "Other race only, Non-Hispanic", "Hispanic")
+AgeCategory_Levels  <- c("Age 18 to 24", "Age 25 to 29", "Age 30 to 34", "Age 35 to 39", "Age 40 to 44",
+                        "Age 45 to 49", "Age 50 to 54", "Age 55 to 59", "Age 60 to 64", "Age 65 to 69",
+                        "Age 70 to 74", "Age 75 to 79", "Age 80 or older")
+TetanusLast10Tdap_Levels <- c("No, did not receive any tetanus shot in the past 10 years", "Yes, received tetanus shot but not sure what type", "Yes, received tetanus shot, but not Tdap", "Yes, received Tdap")
+CovidPos_Levels <- c("No", "Tested positive using home test without a health professional", "Yes")
+
+All_Levels <- list(State=State_Levels, Sex=Sex_Levels, GeneralHealth=GeneralHealth_Levels, LastCheckupTime=LastCheckupTime_Levels, RemovedTeeth=RemovedTeeth_Levels, HadDiabetes=HadDiabetes_Levels, SmokerStatus=SmokerStatus_Levels, ECigaretteUsage=ECigaretteUsage_Levels, RaceEthnicityCategory=RaceEthnicityCategory_Levels, AgeCategory=AgeCategory_Levels, TetanusLast10Tdap=TetanusLast10Tdap_Levels, CovidPos=CovidPos_Levels)
+```
+
+
+```{r}
+ heart <- heart %>%
+   mutate(
+     across(
+     c(State, Sex, GeneralHealth, LastCheckupTime, RemovedTeeth,HadDiabetes,SmokerStatus,
+       ECigaretteUsage,RaceEthnicityCategory, AgeCategory, TetanusLast10Tdap, CovidPos),
+     ~ factor(., levels=unique(.)[order(All_Levels[[cur_column()]])])
+     )
+  )
+glimpse(heart)
+```
+
+### Converting catagorical columns to logicals
+
+Many of our features have the values "Yes" or "No" which means they are binary variables and can become logicals (True or False).
+- PhysicalActivities
+- HadHeartAttack
+- HadAngina
+- HadStroke
+- HadAsthma
+- HadCOPD
+- HadDepressiveDisorder
+- HadKidneyDisease
+- DeafOrHardOfHearing
+- BlindOrVisionDifficulty
+- DifficultyConcentrating
+- DifficultyWalking
+- DifficultyDressingBathing
+- DifficultyErrands
+- ChestScan
+- AlcoholDrinkers
+- HighRiskLastYear
+
+These were the other binary features that we had removed earlier.
+- HadSkinCancer
+- HadArthritis
+- HIVTesting
+- FluVaxLast12
+- PneumoVaxEver
+
+```{r}
+heart <- heart %>%
+  mutate(across(c(PhysicalActivities, HadHeartAttack, HadAngina, HadStroke, HadAsthma,
+                  HadCOPD, HadDepressiveDisorder, HadKidneyDisease,
+                  DeafOrHardOfHearing, BlindOrVisionDifficulty, DifficultyConcentrating,
+                  DifficultyWalking, DifficultyDressingBathing, DifficultyErrands,
+                  ChestScan, AlcoholDrinkers,HighRiskLastYear),
+                ~ . == "Yes"))
+glimpse(heart)
+```
+Lastly, I'm converting the Outcome variable HadHeartAttack to a factor for the models
+```{r}
+heart <- heart %>%
+  mutate(HadHeartAttack= factor(HadHeartAttack, levels=c(TRUE, FALSE)))
+```
+
+Check if there is any missing values
+
+```{r}
+missingValues <- heart %>%
+  map_df(~sum(is.na(.))) %>%
+  gather(variable, missing_count) %>% 
+  filter(missing_count > 0)
+glimpse(missingValues)
+```
+
+Omit any missing data from the dataset
+```{r}
+heart <- na.omit(heart)
+glimpse(heart)
+```
+
+
+Due to a very large number of categories for State, We will be dropping it from our train data due to our models like Random Forest not being able to handle so many categories.  
+```{r}
+# One hot encodoing for State
+# heart$State <- model.matrix(~State-1, heart)
+heart <- heart %>%
+  select(-State)
+glimpse(heart)
+```
+
+## Train-Test Split
+
+This is an 80/20 train/test split (20% testing)
+
+```{r}
+split = initial_split(heart, prop= .8)
+train = training(split)
+test = testing(split)
+glimpse(train)
+```
+
+```{r}
+glimpse(test)
+```
+
+# Exploration
+
+## Explore the data
+
+Now we can do a little exploration of the training data.  Do **not** touch testing data here.
+
+### How many rows? How many columns?
+
+```{r}
+cols = ncol(train)
+rows = nrow(train)
+# summary(train)
+```
+
+The number of rows in the training data are: `r rows`
+
+The number of columns in the training data are: `r cols`
+
+
+### Distributions of features
+
+let us look at the distribution of some features:
+
+First, we look at the HadHeartAttack feature's distribution since this is our outcome variable
+```{r}
+ggplot(train) +
+  aes(x = HadHeartAttack) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Set3") +
+  labs(title="Distribution of HadHeartAttack Feature")
+```
+
+We can see the data is vastly skewed as most medical data is since a majority of the human population does not have heart attacks but many still do. 
+
+This is the distribution for the Gender/Sex Feature
+
+```{r}
+ggplot(train) +
+  aes(x = Sex, fill = Sex) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Distribution of Gender/Sex",x = "Sex",y = "Count",fill = "Sex") +
+  theme_minimal()
+```
+
+In the above plot we see that there is an imbalance in observations betweeen males and females but comparitively to other feature distributions it is not as imbalanced. 
+
+
+This is the distribution for the GeneralHealth feature.
+
+```{r}
+ggplot(train) +
+  aes(x = GeneralHealth, fill = GeneralHealth) +
+  geom_bar() +
+  labs(title="Distribution of GeneralHealth Feature")
+```
+
+In our data, we can see there is an imbalance of data to healthy individuals which makes sense since more people would be healthy than sick in the general public. 
+
+Next we look at the distribution of SmokerStatus.
+
+```{r}
+ggplot(train) +
+  aes(x = SmokerStatus , fill = SmokerStatus ) +
+  geom_bar() +
+  labs(title="Distribution of SmokerStatus Feature")
+
+```
+
+Another interesting distribution in our dataset was the SmokerStatus distribution where we have a high number of Never Smoked and Former Smoked individuals  than the Current Smoker data. This makes sense since even though a high number of the human population smoke the non smoker population is still the vast majority of the population. 
+
+
+Distribution of general health among smokers and non smokers 
+```{r}
+ggplot(train, aes(x = GeneralHealth, fill = SmokerStatus)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Distribution of General Health by Smoker Status")
+```
+
+In this plot we wanted to see if the SmokerStatus feature had any relation to the GeneralHealth feature that could give us insight into how other indicators could be represented in GeneralHealth. We see that the other categories other than Poor did have higher number of Never Smoked counts then the other SmokerStatus categories showing that Smoking Status does indicate poorer health but the great imbalance in data for the GeneralHealth category could be difficult for the models to learn this relationship. 
+
+Finally we visualize the distribution of the Race feature 
+```{r}
+ggplot(train) +
+  aes(x = RaceEthnicityCategory , fill = RaceEthnicityCategory) +
+  geom_bar()+
+  labs(title = "Distribution of RaceEthnicityCategory")
+```
+
+The RaceEthnicityCategory had an interesting distribution where a majority of the observations were White only, Non-Hispanic. This is important to note since diseases or conditions for one ethnic group may skew results. 
+
+Another exploration to see the relation between some numerical variables with general health .
+
+```{r}
+numerical_vars <- c("SleepHours", "MentalHealthDays", "PhysicalHealthDays", "HeightInMeters", "WeightInKilograms", "BMI")
+ggplot(train, aes(x = GeneralHealth, y = SleepHours, fill = GeneralHealth)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of Sleep Hours by General Health")
+```
+This boxplot allows us to observe the central tendency, spread, and presence of outliers of SleepHours within each general health category.
+
+In the plot we can see that the median sleep hours in poor health is lower than the other GeneralHealth Categories indicating less sleep may suggest poorer health.  
+
+Basic summary statistics (mean, median, quartiles, min, max) for the numerical variables. 
+```{r}
+numerical_variables <- train[, c("SleepHours", "MentalHealthDays", "PhysicalHealthDays", "HeightInMeters", "WeightInKilograms", "BMI")]
+summary_stats <- summary(numerical_variables)
+summary_stats
+```
+
+We can see that the statistics do generally make sense except there definitely are outlier values in each of the numerical variable when you compare the 3rd quartile and the max value. 
+
+The following scatter plot visualizes the relationship between BMI (Body Mass Index) and the number of Physical Health Days but categorized with the GeneralHealth feature. 
+
+```{r}
+ggplot(train, aes(x = BMI, y = PhysicalHealthDays, color = GeneralHealth)) +
+  geom_point() +
+  labs(title = "Scatter Plot between BMI and Physical Health by General Health",
+    x = "BMI (Body Mass Index)",y = "Physical Health Days",color = "General Health") +
+  theme_minimal()
+```
+
+Individuals with lower BMI values tend to have better general health and report fewer days with physical health issues compared to those with higher BMI values.
+
+
+ 
+
+### Identify variables that may be useful to predict the outcome.
+
+As we all know age and heart attack are most of the time related/associated to see for the prediction.
+
+```{r}
+ggplot(train) +
+  aes(fill=HadHeartAttack , x=GeneralHealth) +
+  geom_bar()+
+  labs(title = "Distribution of General Health with HadHeartAttack proportions")
+```
+
+With the relationships we saw with some of the features to GeneralHealth we now can see the relationship between GeneralHealth and our outcome variable HadHeartAttack. In this relationship we can see that The Poor Fair and Good categories had a majority of the observations where HadHeartAttack was TRUE. This means that there is some correlation with overall health and HadHeartAttack. Again the imbalance must be noted but this is expected with medical data.  
+
+
+The box plot compares and help visualize the distribution of BMI between individuals who had a heart attack and those who didn't. It helps identify any differences in BMI distribution based on heart attack status. 
+```{r}
+ggplot(train, aes(x = HadHeartAttack, y = BMI, fill = HadHeartAttack)) +
+  geom_boxplot() +
+  labs(title = "Box Plot of BMI by Heart Attack Status",x = "Had Heart Attack",
+       y = "BMI",fill = "Had Heart Attack") +
+  theme_minimal()
+```
+
+It looks like  the 'Had Heart Attack' group exhibits a slightly higher median BMI compared to the 'No Heart Attack' group but it is not statistically significant enough. There are more outliers in the False distribution of HadHeartAttack values but that could be because of the imbalance in the HadHeartAttack distribution.
+
+The following histogram displays the distribution of individuals across different age categories, stacked by whether they had a heart attack.
+ 
+```{r}
+ggplot(train, aes(x = AgeCategory, fill = HadHeartAttack)) +
+  geom_bar(position = "stack") +
+  labs(title = "Histogram of Age Category",x = "Age Category",y = "Count",
+       fill = "Had Heart Attack") +
+  theme_minimal()
+```
+
+The 'Age 70 to 74' and 'Age 75 to 79' categories have a relatively higher overall count.Within these categories, there is a substantial proportion of individuals who had a heart attack.
+This suggests that individuals in these age ranges may be more susceptible to heart attacks or as individual get older they have more heart attacks.
+
+Let us look at the distribution of HadHeartAttack based on GeneralHealth and Sex.
+
+```{r}
+ggplot(train, aes(x = GeneralHealth, fill = HadHeartAttack)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~Sex) +
+  labs(title = "Distribution of General Health with HadHeartAttack proportions by Sex")
+```
+
+In this plot we can see that when we break up the GeneralHealth to HadHeartAttack relationship by Sex we begin to see that more men do have more heartAttacks then woman and we also see that the dataset does have a good balance of observations between the two populations. 
+
+Let's revisit the Distribution of Race/Ethnicity but with its relationshipt to our outcome variable. 
+```{r}
+ggplot(train) +
+  aes(x = RaceEthnicityCategory, fill = HadHeartAttack) +
+  geom_bar() +
+  labs(title = "Distribution of HadHeartAttack Across Race/Ethnicity Categories",x = "Race/Ethnicity Category",
+       y = "Count",
+    fill = "Had Heart Attack") +
+  theme_minimal()
+```
+
+It appears that the white non-Hispanic ethnicity had a higher prevalence of heart attacks but due to the imbalance in the dataset this may not imply any causal relationship.
+
+The following boxplot visually displays the distribution of sleep hours for individuals with and without a reported heart attack
+
+```{r}
+ggplot(train, aes(x = HadHeartAttack, y = SleepHours, fill = HadHeartAttack)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of Sleep Hours by HadHeartAttack",
+    x = "HadHeartAttack",y = "Sleep Hours",fill = "HadHeartAttack") +
+  theme_minimal()
+```
+
+We can see there are no significant differences in sleep hours in those individuals with and without a reported heart attack
+
+The next plot shows the distribution of COVID positive cases among individuals with and without a history of heart attack.
+
+```{r}
+ggplot(train, aes(x = HadHeartAttack, fill = CovidPos)) +
+  geom_bar() +
+  labs(title = "Proportion of COVID Positive Cases by HadHeartAttack",
+    x = "HadHeartAttack",y = "Count",fill = "CovidPos") +
+  theme_minimal()
+```
+
+We can see again an imbalance in the number of Positive Covid observations to negative as expected with a medical dataset since more people would not have Covid in 2022 in the general population. What is interesting is that all individuals who tested positive at home did not have a heart attack. 
+
+The next plot is a scatter Plot of Height vs Weight with categories by the HadHeartAttack Feature.
+
+```{r}
+ggplot(train, aes(x = HeightInMeters, y = WeightInKilograms, color = HadHeartAttack)) +
+  geom_point() +
+  labs(title = "Scatter Plot of Height vs. Weight",x = "Height (in meters)",y = "Weight (in kilograms)",
+       color = "Had Heart Attack") +
+  theme_minimal()
+```
+
+There is no linear pattern between height and weight. In addition the distribution of heart attack seems allover. However we do see a slight  cluster for observations < 2 meter height and <100 kg weight than others. 
+
+### Summary of Exploration
+
+There were many features in this dataset so we could not do many explorations but based on the major feautres we thought may stick out for an individual to have had a heart attack we can see that there are some relationships between the features and the HadHeartAttack feature. The vast imbalance in the dataset for our outcome variable and many of the features may make it hard for our models to accurately predict if an individual has HadHeartAttack but this may give insights into what features really are the key risk factors/indicators that may cause heart disease / heart attacks. 
+
+# Methodology
+
+In order to solve our task of finding the key indicators/risk factors that indicate if an individual has had a heart attack, we chose to use three different models: logistic regression, random forest, and XGBoost. Comparing the feature importance from these 3 models can help find the best indicators/risk factors.
+
+The logistic regression model is commonly used for binary classification making it suitable for our problem of finding if an individual has had a heart attack and since the algorithm provides probabilities for each feature's likelihood of having a heart attack this makes the model interpretable for accomplishing our task. 
+
+The random forest model can capture complex relationships between features and is less prone to overfitting which is great for medical data such as ours that will have imbalanced data. The random forest algorithm creates multiple decision trees trained on a subset of the data which will help capture different complex relationships between the features and then a final decision is made through a voting mechanism from all the trees. This model also provides us with the feature importances gleaned from the multiple trained trees which will be helpful as we want to find the key indicators/risk factors for an individual having a heart attack for our task.
+
+The XGBoost model is similar to random forest where it uses decision trees but instead of bagging multiple decision trees trained on a subset of the data XGBoost builds an esemble of decision trees sequentially where each tree corrects the error of the previous one. This model is well known for being efficient and able to capture complex relationships with the data while being resilient to overfitting which with an imbalanced medical dataset can be important. This model also 
+
+# Modeling and Results
+
+## Logistic Regression Model
+
+### Training
+
+```{r}
+model.logReg <- glm(HadHeartAttack ~ ., train, family = "binomial")
+summary(model.logReg)
+```
+
+### Feature Importance 
+```{r}
+coeff_logReg <- coef(summary(model.logReg))
+coeff_logReg <- as.data.frame(coeff_logReg)
+important_features_logReg <- coeff_logReg %>%
+  arrange(desc(abs(Estimate)))
+important_features_logReg
+```
+
+### Predictions
+
+```{r}
+threshold=0.5
+logReg_scores = predict(model.logReg, test, type = "response") %>%
+  as_tibble() %>%
+  mutate("FALSE"=value) %>%
+  mutate("TRUE"=1-value) %>%
+  mutate(Prediction=factor(if_else(`TRUE` > `FALSE`, TRUE, FALSE), levels=c(TRUE, FALSE)),
+        Label=test$HadHeartAttack)
+glimpse(logReg_scores)
+```
+
+
+### Metrics 
+
+```{r}
+metrics = metric_set(accuracy, precision, sensitivity, specificity)
+measures_logReg <- metrics(logReg_scores, truth=Label, estimate=Prediction)
+measures_logReg
+```
+
+### ROC curve and AUC:
+
+```{r}
+autoplot(roc_curve(logReg_scores, Label, `TRUE`))
+```
+
+```{r}
+logReg_roc_auc <- roc_auc(logReg_scores, Label, `TRUE`)
+logReg_roc_auc
+```
+
+## Random Forest Model
+
+### Training
+
+```{r}
+model.rf = randomForest(HadHeartAttack ~ ., train, na.action=na.omit)
+summary(model.rf)
+```
+
+### Feature Importance
+
+```{r}
+important_features_rf <- importance(model.rf)
+# important_features_rf
+# Sort the features
+important_features_rf_df <- as.data.frame(important_features_rf)
+important_features_rf_df$Feature <- rownames(important_features_rf_df)
+sorted_importance_rf <- important_features_rf_df[order(-important_features_rf_df$MeanDecreaseGini), ]
+sorted_importance_rf$Feature <- NULL # Feature column was duplicated in the data frame
+sorted_importance_rf
+```
+
+### Predictions
+
+```{r}
+rf_scores = predict(model.rf, test, type = "prob") %>%
+  as_tibble() %>%
+ mutate(Prediction=factor(if_else(`TRUE` > `FALSE`, TRUE, FALSE), levels=c(TRUE, FALSE)),
+        Label=test$HadHeartAttack)
+glimpse(rf_scores)
+```
+
+
+### Metrics
+
+```{r}
+metrics = metric_set(accuracy, precision, sensitivity, specificity)
+measures_rf <- metrics(rf_scores, truth=Label, estimate=Prediction)
+measures_rf
+```
+
+### ROC curve and AUC:
+
+```{r}
+autoplot(roc_curve(rf_scores, Label, `TRUE`))
+```
+
+```{r}
+rf_roc_auc <- roc_auc(rf_scores, Label, `TRUE`)
+rf_roc_auc
+```
+
+## XGBoost model
+
+### Training
+
+
+
+```{r}
+train_labels <- train %>%
+  select(HadHeartAttack)
+train_features <- train %>%
+  select(-HadHeartAttack)
+
+test_labels <- test %>%
+  select(HadHeartAttack)
+test_features <- test%>%
+  select(-HadHeartAttack)
+
+xgb_train <- xgb.DMatrix(data=data.matrix(train_features), label=data.matrix(train_labels == TRUE))
+xgb_test <- xgb.DMatrix(data=data.matrix(test_features), label=data.matrix(test_labels == TRUE))
+
+model.xgb = xgboost(data=xgb_train,
+                   params=list(objective="binary:logistic", max.depth=5, early_stopping_rounds=15, gamma=1),
+                   nrounds=100)
+```
+
+### Feature Importance
+
+```{r}
+important_features_xgb <- xgb.importance(colnames(data.matrix(train_features)), model=model.xgb)
+important_features_xgb
+```
+
+
+### Predictions
+
+```{r}
+xgb_scores = predict(model.xgb, xgb_test, type = "prob") %>%
+  as_tibble() %>%
+  mutate("TRUE"=value) %>%
+  mutate("FALSE"=1-value) %>%
+  mutate(Prediction=factor(if_else(`TRUE` > `FALSE`, TRUE, FALSE), levels=c(TRUE, FALSE)),
+        Label=test$HadHeartAttack)
+glimpse(xgb_scores)
+```
+
+
+### Metrics
+
+```{r}
+metrics = metric_set(accuracy, precision, sensitivity, specificity)
+measures_xgb <- metrics(xgb_scores, truth=Label, estimate=Prediction)
+measures_xgb
+```
+
+### ROC curve and AUC:
+
+```{r}
+autoplot(roc_curve(xgb_scores, Label, `TRUE`))
+```
+
+```{r}
+xgb_roc_auc <- roc_auc(xgb_scores, Label, `TRUE`)
+xgb_roc_auc
+```
+
+# Evaluation
+
+Compare Metrics here for each model:
+- What metrics did we use? 
+- What we found/learn from the results of our evaluation. 
+
+Compare feature importance between each model: 
+- What features were important to each model
+- Similarities/Differences
+
+```{r}
+# Feature Importance
+important_features_logReg
+sorted_importance_rf
+important_features_xgb
+```
+
+Looking at the Feature Importances for each model, the top similar features were HadAngina, AgeCategory, GeneralHealth, and ChestScan. 
+
+One thing to note is that the Logistic Regresion feature importance show each categories estimate whereas the Random Forest and XGBoost models only show the features importance overall. 
+
+
+```{r}
+# METRICS
+# measures_logReg
+# measures_rf
+# measures_xgb
+measures <- bind_rows(
+  mutate(Model="Logistic Regression", measures_logReg),
+  mutate(Model="Random Forest", measures_rf),
+  mutate(Model="XGBoost", measures_xgb),
+)
+measures
+```
+
+```{r}
+ggplot(measures)+
+  aes(x=Model, y=.estimate)+
+  geom_bar(position="dodge", stat = "identity")+
+  facet_grid(~.metric) +
+  labs(title = "Metrics for Logistic Regression, Random Forest, and XGBoost")
+```
+
+The metrics show that each of the models resulted in similar performances. The Accuracy was very good and so was the specificity which should not be a surprise since there were many more HadHeartAttack=FALSE observations then TRUE. An interesting thing to note is that the sensitivity of the random forest was lower than the other two models which had very similar sensitivy metrics. This means that the random forest model is only finding 0.1693520 or 16.9% of HadHeartAttack observations vs approximately 25% for the other two models. The low value of the sensitivity metric is most likely due to the great imbalance in the dataset but we can see that LogisticRegression and XGBoost did slightly better at predicting if an individual had a heart attack then random forest.  
+
+
+```{r}
+# ROC AUCs
+result_AUCs <- data.frame(model = character(), AUC = numeric())
+result_AUCs <- rbind(result_AUCs, data.frame(model = "Logistic Regression", AUC=logReg_roc_auc$.estimate))
+result_AUCs <- rbind(result_AUCs, data.frame(model = "Random Forest", AUC=rf_roc_auc$.estimate))
+result_AUCs <- rbind(result_AUCs, data.frame(model = "XGBoost", AUC=xgb_roc_auc$.estimate))
+result_AUCs
+```
+
+The area under the curve of the receiver operating curve is approximately the same for all three models at ~88% showing the models did train well on the imbalanced data. 
+
+
+# Major challenges and Solutions
+One of the confusing things we found was the predictions from LogisticRegression were flipped from the order of the level. We set the levels for HadHeartAttack, our outcome variable, to TRUE then FALSE but in the predicitions we had to set the probabilities to the FALSE outcome and 1- (probability) to TRUE. With this change the metrics and results were like the other models.  
+
+
+The other challenge was finding the feature importance of logistic regression model. After training the model the summary provides estimates for each feature which explains the weight of each feature in the y = mx + b equation. Using this we can determine which features were most important to the model as it trained to determine the outcome variable HadHeartAttack. We sorted the features by descending and absolute value because even though the feature had a –estimate that still was an important indicator when determining if an individual had a heart attack or not.  
+
+# Conculsion 
+
+In conclusion, our models feature importances showed the top features for detecting if an individual had a heart attack were HadAngina, AgeCategory, GeneralHealth, and ChestScan. Our exploratory analysis unveiled that the Poor, Fair, and Good categories of GeneralHealth had a majority of the observations where an individual had a heart attack which is what the models trained on and detected as an important feature supporting what we had explored for the GeneralHealth feature. We saw a similar distribution for the AgeCategory features where the older age group categories had more observations for an individual having had a heart attack and our models also deemed that to be a good feature for predicting if an individual has had a heart attack.
+
+The regression model showcased the intricate nature of prediction, integrating demographics and health factors, boasting a robust ROC AUC of 0.8881 and 94.7% accuracy. While the Random Forest model excelled in accuracy and specificity, addressing sensitivity enhances its balanced predictive capability. The XGBoost model demonstrated commendable performance, with accuracy and specificity strength, highlighting an opportunity for sensitivity improvement. Collectively, these models contribute to a holistic understanding, emphasizing the multifaceted nature of heart attack prediction and providing a foundation for targeted interventions and preventive measures in heart attack management. The low value of the sensitivity metric is most likely due to the great imbalance in the dataset but we can see that LogisticRegression and XGBoost did slightly better at predicting if an individual had a heart attack then random forest.
+
+
+# Future Work
+In future work, addressing the imbalanced data set can be approached by either balancing the outcome classes or exploring resampling techniques to maintain a sufficient amount of data for robust model training. Another idea is to test each model with a dedicated subset containing only true positive observations of indivdiuals who have had heart attacks to see how well our model's generalized to the imbalanced training data.  
+
+Additionally, the inclusion of vital variables such as cholesterol panels (LDL, HDL), blood pressure, and dietary information holds promise for enhancing the model's predictive capacity. These features are recognized risk factors for heart attacks and can provide a more comprehensive understanding of the intricate relationships influencing the outcomes. 
+
+By integrating these strategies, future efforts aim to refine the model's performance, ensuring a balanced dataset and incorporating key variables that contribute to a more accurate prediction of heart attack risk.
